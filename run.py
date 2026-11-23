@@ -8,6 +8,10 @@ requirements-vllm.lock.txt. Each command starts the vLLM server, does its work, 
     python -I harness/analyze.py runs/exp02             # gates and summary.json
 
 Cells already done in the run folder are skipped by `all`, so an interrupted run can be resumed.
+
+    python -I run.py all --engine sglang --vllm /usr/bin/python3 --out runs/exp02_sglang   # same cells on SGLang 0.5.21
+
+--deadline (Unix time) is the budget stop for paid machines: no cell starts unless it can end, drain included, before it.
 """
 import argparse
 import asyncio
@@ -25,6 +29,8 @@ import replay  # noqa: E402
 import server  # noqa: E402
 
 DATA = HERE / "data"
+ENGINES = {"vllm": "vLLM 0.32.0", "sglang": "SGLang 0.5.21"}
+CELL_DRAIN_S = 300.0
 
 
 # ------------------------------------------------------------------------------------------- config
@@ -44,7 +50,7 @@ def rates_from(calib, C, manifest_path=DATA / "manifest.json"):
     return out
 
 
-def cell_cfgs(rule, rates, C, calib, cells=None, wall_s=None, count_window_s=None, gpu=None, experiment="exp02"):
+def cell_cfgs(rule, rates, C, calib, cells=None, wall_s=None, count_window_s=None, gpu=None, experiment="exp02", engine="vllm"):
     out = []
     for c in rule["cells"]:
         if cells is not None and c["name"] not in cells:
@@ -54,7 +60,7 @@ def cell_cfgs(rule, rates, C, calib, cells=None, wall_s=None, count_window_s=Non
                         wall_s=wall_s or rule["cell"]["wall_s"], C=C, PF=calib["PF"], TAU=calib["tau_full"],
                         alpha=rule["gate"]["alpha"], K=rule["gate"]["K_fraction_of_C"] * C, window_s=rule["gate"]["window_s"],
                         count_window_s=count_window_s or rule["cell"]["count_window_s"], experiment=experiment, gpu=gpu,
-                        prefix_caching="off"))
+                        prefix_caching="off", engine=ENGINES[engine]))
     if cells is not None:
         unknown = set(cells) - {c["cell"] for c in out}
         if unknown:
@@ -74,11 +80,12 @@ def gpu_name():
 # ------------------------------------------------------------------------------------------- one run folder
 
 class RunDir:
-    def __init__(self, out, C, model, revision):
+    def __init__(self, out, C, model, revision, engine="vllm"):
         self.out = Path(out)
         self.out.mkdir(parents=True, exist_ok=True)
         p = self.out / "state.json"
-        self.state = json.loads(p.read_text()) if p.exists() else dict(vllm="0.32.0", model=model, revision=revision, regimes=[], notes=[])
+        fresh = dict(engine=ENGINES[engine], model=model, revision=revision, regimes=[], notes=[])
+        self.state = json.loads(p.read_text()) if p.exists() else fresh
         self.regime = next((r for r in self.state["regimes"] if r["C"] == C), None)
         if self.regime is None:
             self.regime = dict(C=C, engine_reported_kv_tokens=None, cells={})
@@ -95,7 +102,11 @@ class RunDir:
         self.save()
 
 
-def run_one(rd, cfg, reqs, base_url):
+def reset_path(engine):
+    return "/flush_cache" if engine == "sglang" else "/reset_prefix_cache"
+
+
+def run_one(rd, cfg, reqs, base_url, engine="vllm"):
     C = rd.regime["C"]
     print(f"cell {cfg['cell']}: arm {cfg['arm']} door {cfg['door']} rate {cfg['rate']:.4f}/s for {cfg['wall_s']} s", flush=True)
     cdir = rd.out / f"cells_{C}" / cfg["cell"]
@@ -104,10 +115,11 @@ def run_one(rd, cfg, reqs, base_url):
     except Exception as exc:
         rd.note(f"{cfg['cell']} failed: {type(exc).__name__} {str(exc)[:300]}")
         rd.regime["cells"][cfg["cell"]] = dict(failed=True)
-        rd.regime[f"reset_after_{cfg['cell']}"] = server.idle_and_reset(base_url, replay.parse_metrics)
+        rd.regime[f"reset_after_{cfg['cell']}"] = server.idle_and_reset(base_url, replay.parse_metrics,
+                                                                        reset_path=reset_path(engine))
         rd.save()
         return None
-    rd.regime[f"reset_after_{cfg['cell']}"] = server.idle_and_reset(base_url, replay.parse_metrics)
+    rd.regime[f"reset_after_{cfg['cell']}"] = server.idle_and_reset(base_url, replay.parse_metrics, reset_path=reset_path(engine))
     plog = measure.read_jsonl(rd.out / "preempt.jsonl")
     m = measure.cell_measures(res, plog, cfg["PF"], C)
     (cdir / "measures.json").write_text(json.dumps(m, indent=1))
@@ -128,7 +140,10 @@ def main(argv=None):
     ap.add_argument("--revision", default=None, help="model revision (default: the config's pinned commit; ignored for a local folder)")
     ap.add_argument("--kv-tokens", type=int, default=None, help="KV capacity C in tokens (default: the config's 190000)")
     ap.add_argument("--port", type=int, default=8000)
-    ap.add_argument("--vllm", default="vllm", help="the vllm executable")
+    ap.add_argument("--vllm", default="vllm", help="the vllm executable (with --engine sglang: the Python that has sglang)")
+    ap.add_argument("--engine", choices=sorted(ENGINES), default="vllm")
+    ap.add_argument("--deadline", type=float, default=None,
+                    help="Unix time; no cell starts that could end after it (budget stop)")
     ap.add_argument("--recalibrate", action="store_true", help="calibrate again even if the run folder has a calibration")
     args = ap.parse_args(argv)
     if args.command == "cell" and not args.cells:
@@ -141,7 +156,8 @@ def main(argv=None):
     C = args.kv_tokens or rule["engine"]["kv_tokens"]
     model = args.model or rule["model"]["repo"]
     revision = None if Path(model).exists() else (args.revision or rule["model"]["revision"])
-    rd = RunDir(args.out, C, model, revision)
+    rd = RunDir(args.out, C, model, revision, args.engine)
+    replay.ENGINE = args.engine
     gpu = gpu_name()
     rd.state.setdefault("gpus", [])
     if gpu and gpu not in rd.state["gpus"]:
@@ -150,13 +166,18 @@ def main(argv=None):
     replay.URL = base_url = f"http://127.0.0.1:{args.port}"
 
     t_start = time.time()
-    srv, log_path = server.start(rd.out, model, revision, C, args.port, prefix_caching=False, vllm=args.vllm)
+    srv, log_path = server.start(rd.out, model, revision, C, args.port, prefix_caching=False, vllm=args.vllm, engine=args.engine)
     if srv is None:
         rd.note(f"server did not start with KV {C} tokens; see {log_path}")
         sys.exit(1)
     try:
         rd.regime["engine_reported_kv_tokens"] = server.engine_kv_tokens(log_path)
         print("engine reports KV tokens:", rd.regime["engine_reported_kv_tokens"], flush=True)
+        kv = rd.regime["engine_reported_kv_tokens"]
+        if args.engine == "sglang" and (kv is None or kv < 0.995 * C):
+            rd.note(f"SGLang allocated {kv} KV tokens, below C={C}; memory, not --max-total-tokens, set the pool, "
+                    "so this run would not match the vLLM runs")
+            sys.exit(1)
         if not server.plugin_loaded(rd.out / "preempt.jsonl", t_start):
             rd.note("the preemption plugin did not load, so rebuild measures would be empty; check that vllm runs from the "
                     "environment where requirements-vllm.lock.txt was installed")
@@ -168,7 +189,8 @@ def main(argv=None):
             cal = asyncio.run(replay.calibrate(rd.out / f"calib_{C}", C, seed=1, evict_wall_s=evict))
             rd.regime["calibration"] = {k: v for k, v in cal.items() if k != "evict"}
             rd.regime["rates"] = rates_from(cal, C)
-            rd.regime["reset_after_calibration"] = server.idle_and_reset(base_url, replay.parse_metrics)
+            rd.regime["reset_after_calibration"] = server.idle_and_reset(base_url, replay.parse_metrics,
+                                                                         reset_path=reset_path(args.engine))
             rd.save()
             print("calibration:", json.dumps(rd.regime["calibration"])[:1500], flush=True)
             print("rates:", json.dumps(rd.regime["rates"]), flush=True)
@@ -178,11 +200,12 @@ def main(argv=None):
 
         if smoke:
             cfgs = cell_cfgs(rule, rates, C, cal, cells=rule["smoke"]["cells"], wall_s=rule["smoke"]["wall_s"],
-                             count_window_s=rule["smoke"]["count_window_s"], gpu=gpu, experiment="exp02-smoke")
+                             count_window_s=rule["smoke"]["count_window_s"], gpu=gpu, experiment="exp02-smoke",
+                             engine=args.engine)
         elif args.command == "cell":
-            cfgs = cell_cfgs(rule, rates, C, cal, cells=args.cells, gpu=gpu)
+            cfgs = cell_cfgs(rule, rates, C, cal, cells=args.cells, gpu=gpu, engine=args.engine)
         else:
-            cfgs = cell_cfgs(rule, rates, C, cal, gpu=gpu)
+            cfgs = cell_cfgs(rule, rates, C, cal, gpu=gpu, engine=args.engine)
 
         in_run = args.command == "all"
         n_core = len(rule["core_cells"])
@@ -199,7 +222,10 @@ def main(argv=None):
                 m_path = rd.out / f"cells_{C}" / cfg["cell"] / "measures.json"
                 m = json.loads(m_path.read_text())
             else:
-                m = run_one(rd, cfg, reqs[cfg["trace"]], base_url)
+                if args.deadline is not None and time.time() + cfg["wall_s"] + CELL_DRAIN_S > args.deadline:
+                    rd.note(f"budget stop: {cfg['cell']} could not finish before the deadline; remaining cells not run")
+                    break
+                m = run_one(rd, cfg, reqs[cfg["trace"]], base_url, args.engine)
                 if m is None:
                     continue
             if not in_run:

@@ -1,8 +1,14 @@
-"""The proxy, the four arms and the calibration, run against a vLLM server (by default on 127.0.0.1:8000).
+"""The proxy, the four arms and the calibration, run against a vLLM or SGLang server (by default on 127.0.0.1:8000).
 
 The proxy sees what a gateway sees: each request's prompt length on arrival, the tokens it streams back, and the
-server's Prometheus metrics. Only the known-length arm reads the trace's output length. Every arm sends
-max_tokens = L with ignore_eos, and vLLM's admission does not read max_tokens.
+server's Prometheus metrics. Only the known-length arm reads the trace's output length. On vLLM every arm sends
+max_tokens = L with ignore_eos, and vLLM's admission does not read max_tokens. SGLang's admission does read it
+(it reserves min(max_new_tokens, 4096) times an adapted ratio), so on SGLang every arm sends max_tokens =
+SGLANG_MAX_NEW, the trace's output clip (less if the prompt leaves less room in the context), and the proxy
+closes the stream once L tokens have arrived; SGLang then aborts the request and frees its memory. SGLang aborts
+every request whose rid starts with the closed one's rid, so each rid sent to SGLang ends with RID_END.
+ignore_eos would switch SGLang (radix cache off) to a separate admission path that reserves the full max_new_tokens,
+so on SGLang the EOS tokens are banned with logit_bias instead.
 
 Decisions go through AdmitPerf's Policy class (vendored at commit 5bcb81c, see vendor/), so every decision is logged
 in its format.
@@ -23,6 +29,11 @@ from admitperf import Policy  # noqa: E402
 
 URL = "http://127.0.0.1:8000"
 MODEL = "qwen3-8b"
+ENGINE = "vllm"           # or "sglang"; set by run.py
+SGLANG_MAX_NEW = 16000
+CONTEXT_LEN = 40960
+RID_END = "|"
+EOS_TOKEN_IDS = (151643, 151645)   # Qwen3 <|endoftext|>, <|im_end|>
 TTFT_LIMIT, TPOT_LIMIT = 30.0, 0.150
 VOCAB_LO, VOCAB_HI = 1000, 150000
 TRACE_SEED = {"thinking": 1, "chat": 2, "thinking_long": 1}   # thinking_long reuses the Thinking block IDs
@@ -60,6 +71,10 @@ def unique_prompt(n, seed):
 
 KEYS = {"vllm:kv_cache_usage_perc": "kv", "vllm:num_requests_running": "running", "vllm:num_requests_waiting": "waiting",
         "vllm:num_preemptions_total": "preempt", "vllm:prompt_tokens_total": "prompt_tok", "vllm:generation_tokens_total": "gen_tok"}
+# SGLang 0.5.21 with --enable-metrics. num_queue_reqs includes retracted requests, as vLLM's waiting count does.
+KEYS_SGLANG = {"sglang:token_usage": "kv", "sglang:num_running_reqs": "running", "sglang:num_queue_reqs": "waiting",
+               "sglang:num_retracted_requests_total": "preempt", "sglang:prompt_tokens_total": "prompt_tok",
+               "sglang:generation_tokens_total": "gen_tok"}
 
 
 def parse_metrics(txt):
@@ -68,7 +83,7 @@ def parse_metrics(txt):
         if not line or line[0] == "#":
             continue
         name = line.split("{", 1)[0].split(" ", 1)[0]
-        k = KEYS.get(name)
+        k = (KEYS_SGLANG if ENGINE == "sglang" else KEYS).get(name)
         if k:
             out[k] = out.get(k, 0.0) + float(line.rsplit(" ", 1)[1])
     return out
@@ -147,7 +162,7 @@ def oracle_peak(items):
 
 class Req:
     __slots__ = ("rid", "i", "p", "L", "t_arr", "t_send", "t_first", "t_last", "n", "state", "marks", "max_gap",
-                 "t_mark", "t_restart", "task", "chunks", "err")
+                 "t_mark", "t_restart", "task", "chunks", "err", "max_tokens")
 
     def __init__(self, rid, i, p, L, t_arr):
         self.rid, self.i, self.p, self.L, self.t_arr = rid, i, p, L, t_arr
@@ -155,6 +170,7 @@ class Req:
         self.n, self.state, self.marks, self.max_gap = 0, "queued", 0, 0.0
         self.t_mark = None
         self.t_restart = None
+        self.max_tokens = None   # set only by calibration; trace requests never reveal L to SGLang
         self.task = None
         self.chunks = None
         self.err = None
@@ -166,8 +182,14 @@ class Req:
 
 
 async def stream_one(session, r, prompt, on_token, keep_chunks=False):
-    body = dict(model=MODEL, prompt=prompt, max_tokens=r.L, ignore_eos=True, temperature=0.0, stream=True,
-                stream_options=dict(include_usage=True, continuous_usage_stats=True))
+    sglang = ENGINE == "sglang"
+    body = dict(model=MODEL, prompt=prompt, max_tokens=(r.max_tokens or min(SGLANG_MAX_NEW, CONTEXT_LEN - r.p)) if sglang else r.L, temperature=0.0,
+                stream=True, stream_options=dict(include_usage=True, continuous_usage_stats=True))
+    if sglang:
+        body["rid"] = r.rid + RID_END
+        body["logit_bias"] = {str(t): -100.0 for t in EOS_TOKEN_IDS}
+    else:
+        body["ignore_eos"] = True
     r.t_send = time.time()
     r.state = "sent"
     if keep_chunks:
@@ -198,6 +220,9 @@ async def stream_one(session, r, prompt, on_token, keep_chunks=False):
                     if keep_chunks:
                         r.chunks.append((round(now, 4), n))
                     on_token(r, now)
+                    if sglang and r.n >= r.L:
+                        resp.close()   # SGLang sees the disconnect and aborts the request
+                        break
         r.state = "finished" if r.n >= r.L else "short"
     except asyncio.CancelledError:
         raise
@@ -230,7 +255,7 @@ class Cell:
         if self.arm == "gate":
             params = dict(alpha=cfg["alpha"], K=cfg["K"], window_s=cfg["window_s"])
         self.policy = pol_cls(log=str(self.out_dir / "decisions.jsonl"), experiment=cfg.get("experiment", "exp02"), run=cfg["cell"],
-                              notes=f"Qwen3-8B, vLLM 0.32.0, {cfg.get('gpu', 'GPU not named')}, C={int(self.C)} tokens, prefix caching {cfg.get('prefix_caching', 'off')}, trace {cfg['trace']}, load {cfg['load']}x",
+                              notes=f"Qwen3-8B, {cfg.get('engine', 'vLLM 0.32.0')}, {cfg.get('gpu', 'GPU not named')}, C={int(self.C)} tokens, prefix caching {cfg.get('prefix_caching', 'off')}, trace {cfg['trace']}, load {cfg['load']}x",
                               provenance={"C": "pinned", "alpha": "pre-registered", "K": "pre-registered", "frac": "pre-registered"}, **params)
 
     # --- signals the proxy derives
@@ -260,9 +285,13 @@ class Cell:
             r.t_restart = now
 
     def on_preemptions(self, d, now):
-        """Attribute d new preemptions to the d most recently (re)started resident requests, as vLLM evicts the newest."""
+        """Attribute d new preemptions to the requests the engine evicts first: on vLLM the most recently (re)started
+        resident requests, on SGLang those with the fewest tokens decoded (ties: the longest prompt)."""
         cands = [r for r in self.live.values() if r.t_mark is None]
-        cands.sort(key=lambda r: max(r.t_send or 0.0, r.t_restart or 0.0), reverse=True)
+        if ENGINE == "sglang":
+            cands.sort(key=lambda r: (r.n, -r.p))
+        else:
+            cands.sort(key=lambda r: max(r.t_send or 0.0, r.t_restart or 0.0), reverse=True)
         for r in cands[:d]:
             r.t_mark = now
             r.marks += 1
@@ -432,8 +461,9 @@ async def run_cell(cfg, reqs, out_dir):
 
 # ------------------------------------------------------------------------------------------------ calibration
 
-async def _one(session, rid, prompt, L, keep_chunks=False):
+async def _one(session, rid, prompt, L, keep_chunks=False, exact_max=False):
     r = Req(rid, -1, len(prompt), L, time.time())
+    r.max_tokens = L if exact_max else None
     await stream_one(session, r, prompt, lambda *a: None, keep_chunks=keep_chunks)
     return r
 
@@ -455,11 +485,20 @@ async def calibrate(out_dir, C, seed=0, evict_wall_s=420.0):
         big = [x for x in pf if x["tokens"] >= 8192]
         out["PF"] = float(np.median([x["tokens"] / x["ttft_cold"] for x in big]))
         out["PF_hot_equiv"] = float(np.median([x["tokens"] / x["ttft_hot"] for x in big]))
-        # 2. decode step time near a full cache: 24 requests of 6,000 prompt tokens and 1,600 output tokens (no preemption)
+        # 2. decode step time near a full cache: 24 requests of 6,000 prompt tokens and 1,600 output tokens (no preemption).
+        # They send max_tokens = 1,600 so SGLang's reservation (prompt + 0.7 * min(max_tokens, 4096)) admits all 24 at once.
         n_req = 24
-        reqs = [asyncio.ensure_future(_one(s, f"cal{seed}-tau{j}", unique_prompt(6000, 30_000 + 100 * seed + j), 1600, keep_chunks=True))
+        reqs = [asyncio.ensure_future(_one(s, f"cal{seed}-tau{j}", unique_prompt(6000, 30_000 + 100 * seed + j), 1600,
+                                           keep_chunks=True, exact_max=True))
                 for j in range(n_req)]
         rs = await asyncio.gather(*reqs)
+        out["tau_no_token"] = [r.rid for r in rs if r.t_first is None]
+        rs = [r for r in rs if r.t_first is not None]
+        if not rs:
+            raise RuntimeError(f"no decode-calibration request produced a token: {out['tau_no_token']}")
+        # SGLang may hold a few back until the first ones finish; time only the requests that decoded together
+        rs = [r for r in rs if r.t_first < min(x.t_last for x in rs)]
+        out["tau_n_concurrent"] = len(rs)
         t_all_first = max(r.t_first for r in rs)
         t_first_end = min(r.t_last for r in rs)
         per = []
@@ -469,7 +508,7 @@ async def calibrate(out_dir, C, seed=0, evict_wall_s=420.0):
                 per.append((pts[-1][0] - pts[0][0]) / max(pts[-1][1] - pts[0][1], 1))
         out["tau_full"] = float(np.median(per)) if per else None
         out["tau_full_window_s"] = t_first_end - t_all_first
-        out["tau_kv_tokens_range"] = [n_req * (6000 + 0), n_req * 7600]
+        out["tau_kv_tokens_range"] = [len(rs) * 6000, len(rs) * 7600]
         one = await _one(s, f"cal{seed}-tau1", unique_prompt(2000, 40_000 + seed), 300, keep_chunks=True)
         c = one.chunks
         out["tau_single"] = (c[-1][0] - c[5][0]) / max(c[-1][1] - c[5][1], 1)

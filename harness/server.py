@@ -1,4 +1,5 @@
-"""Start and stop the vLLM 0.32.0 server the way our runs did, with the preemption plugin loaded.
+"""Start and stop the vLLM 0.32.0 server the way our runs did, with the preemption plugin loaded, or SGLang 0.5.21
+with the same settings where it has them and plugin/sglang/sitecustomize.py for the retraction log.
 
 The KV cache is fixed in tokens through --kv-cache-memory-bytes, so the capacity C is the same on any GPU with
 enough memory. The engine reports the size it actually built in its log; run.py records it beside C.
@@ -30,9 +31,25 @@ def serve_command(model, revision, kv_tokens, port, prefix_caching=False, vllm="
     return cmd
 
 
-def server_env(preempt_log):
+def sglang_command(model, revision, kv_tokens, port, prefix_caching=False, python="python3"):
+    """SGLang has no KV size in bytes; --max-total-tokens caps the pool in tokens. Page size stays at its default of 1.
+    The cap binds only if the static memory fraction leaves room for it: L40S containers differ by ~3 GB of free memory,
+    so the fraction is high and the prefill CUDA graphs (1.4 GB) are off; run.py stops if the pool comes out short."""
+    cmd = [python, "-m", "sglang.launch_server", "--model-path", model, "--served-model-name", "qwen3-8b", "--host", "127.0.0.1",
+           "--port", str(port), "--context-length", "40960", "--max-total-tokens", str(kv_tokens),
+           "--max-running-requests", "256", "--chunked-prefill-size", "8192", "--random-seed", "0", "--enable-metrics",
+           "--mem-fraction-static", "0.95", "--disable-prefill-cuda-graph"]
+    if not prefix_caching:
+        cmd.append("--disable-radix-cache")
+    if revision:
+        cmd[5:5] = ["--revision", revision]
+    return cmd
+
+
+def server_env(preempt_log, engine="vllm"):
     env = dict(os.environ, **QUIET_ENV)
-    env["PYTHONPATH"] = os.pathsep.join([str(PLUGIN_DIR)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+    plugin = PLUGIN_DIR / "sglang" if engine == "sglang" else PLUGIN_DIR
+    env["PYTHONPATH"] = os.pathsep.join([str(plugin)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
     env["ACR_PREEMPT_LOG"] = str(preempt_log)
     env["VLLM_SERVER_DEV_MODE"] = "1"   # needed for POST /reset_prefix_cache between cells
     return env
@@ -51,21 +68,26 @@ def killpg(p):
             pass
 
 
-def start(out, model, revision, kv_tokens, port, prefix_caching=False, vllm="vllm", wait_s=1200):
-    """Start vLLM and wait for /health. Returns (process, log path), or (None, log path) if it did not come up."""
+def start(out, model, revision, kv_tokens, port, prefix_caching=False, vllm="vllm", wait_s=1200, engine="vllm"):
+    """Start the engine and wait for /health. Returns (process, log path), or (None, log path) if it did not come up.
+    For SGLang, `vllm` names the Python executable that has sglang installed."""
     out = Path(out)
     log_path = out / f"server_{kv_tokens}.log"
-    cmd = serve_command(model, revision, kv_tokens, port, prefix_caching, vllm)
+    if engine == "sglang":
+        cmd = sglang_command(model, revision, kv_tokens, port, prefix_caching, vllm)
+    else:
+        cmd = serve_command(model, revision, kv_tokens, port, prefix_caching, vllm)
     log = open(log_path, "a")
     log.write(f"# {' '.join(cmd)}\n")
     log.flush()
-    p = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=server_env(out / "preempt.jsonl"), start_new_session=True)
+    p = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=server_env(out / "preempt.jsonl", engine),
+                         start_new_session=True)
     url = f"http://127.0.0.1:{port}/health"
     t0 = time.time()
     while time.time() - t0 < wait_s:
         try:
             if urllib.request.urlopen(url, timeout=5).status == 200:
-                print(f"vllm up after {time.time() - t0:.0f} s with KV {kv_tokens} tokens", flush=True)
+                print(f"{engine} up after {time.time() - t0:.0f} s with KV {kv_tokens} tokens", flush=True)
                 return p, log_path
         except Exception:
             pass
@@ -78,7 +100,9 @@ def start(out, model, revision, kv_tokens, port, prefix_caching=False, vllm="vll
 
 
 def engine_kv_tokens(log_path):
-    m = re.findall(r"GPU KV cache size: ([\d,]+) tokens", Path(log_path).read_text())
+    txt = Path(log_path).read_text()
+    m = (re.findall(r"GPU KV cache size: ([\d,]+) tokens", txt)
+         or re.findall(r"KV Cache is allocated\. dtype: \S+, #tokens: (\d+)", txt))
     return int(m[-1].replace(",", "")) if m else None
 
 
@@ -96,8 +120,8 @@ def plugin_loaded(preempt_log, since):
     return False
 
 
-def idle_and_reset(base_url, parse_metrics, timeout=120):
-    """Wait until the engine has no running or waiting request, then reset the prefix cache."""
+def idle_and_reset(base_url, parse_metrics, timeout=120, reset_path="/reset_prefix_cache"):
+    """Wait until the engine has no running or waiting request, then reset the prefix cache (SGLang: /flush_cache)."""
     t0 = time.time()
     m = {}
     while time.time() - t0 < timeout:
@@ -110,7 +134,7 @@ def idle_and_reset(base_url, parse_metrics, timeout=120):
         time.sleep(1)
     ok = False
     try:
-        req = urllib.request.Request(base_url + "/reset_prefix_cache", data=b"", method="POST")
+        req = urllib.request.Request(base_url + reset_path, data=b"", method="POST")
         ok = urllib.request.urlopen(req, timeout=30).status == 200
     except Exception as exc:
         print("reset_prefix_cache failed:", exc, flush=True)
