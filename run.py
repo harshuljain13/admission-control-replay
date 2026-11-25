@@ -50,13 +50,16 @@ def rates_from(calib, C, manifest_path=DATA / "manifest.json"):
     return out
 
 
-def cell_cfgs(rule, rates, C, calib, cells=None, wall_s=None, count_window_s=None, gpu=None, experiment="exp02", engine="vllm"):
+def cell_cfgs(rule, rates, C, calib, cells=None, wall_s=None, count_window_s=None, gpu=None, experiment=None, engine="vllm"):
+    experiment = experiment or rule.get("id", "exp02")
     out = []
     for c in rule["cells"]:
         if cells is not None and c["name"] not in cells:
             continue
+        cap = rates[c["trace"]]["lam_cap"]
+        segs = [[t, x * cap] for t, x in c["surge"]] if c.get("surge") else None
         out.append(dict(cell=c["name"], arm=c["arm"], door=c.get("door", False), trace=c["trace"], load=c["load"],
-                        rate=c["load"] * rates[c["trace"]]["lam_cap"], arrival_seed=c["arrival_seed"],
+                        rate=c["load"] * cap, segments=segs, surge=c.get("surge"), arrival_seed=c["arrival_seed"],
                         wall_s=wall_s or rule["cell"]["wall_s"], C=C, PF=calib["PF"], TAU=calib["tau_full"],
                         alpha=rule["gate"]["alpha"], K=rule["gate"]["K_fraction_of_C"] * C, window_s=rule["gate"]["window_s"],
                         count_window_s=count_window_s or rule["cell"]["count_window_s"], experiment=experiment, gpu=gpu,
@@ -162,7 +165,7 @@ def main(argv=None):
     rd.state.setdefault("gpus", [])
     if gpu and gpu not in rd.state["gpus"]:
         rd.state["gpus"].append(gpu)
-    reqs = {"thinking_long": replay.load_reqs(DATA / "thinking_long.jsonl")}
+    reqs = {tr: replay.load_reqs(DATA / f"{tr}.jsonl") for tr in ("thinking_long", "chat") if (DATA / f"{tr}.jsonl").exists()}
     replay.URL = base_url = f"http://127.0.0.1:{args.port}"
 
     t_start = time.time()
@@ -174,9 +177,9 @@ def main(argv=None):
         rd.regime["engine_reported_kv_tokens"] = server.engine_kv_tokens(log_path)
         print("engine reports KV tokens:", rd.regime["engine_reported_kv_tokens"], flush=True)
         kv = rd.regime["engine_reported_kv_tokens"]
-        if args.engine == "sglang" and (kv is None or kv < 0.995 * C):
-            rd.note(f"SGLang allocated {kv} KV tokens, below C={C}; memory, not --max-total-tokens, set the pool, "
-                    "so this run would not match the vLLM runs")
+        if kv is None or kv < 0.995 * C:
+            rd.note(f"{args.engine} allocated {kv} KV tokens, below C={C}; memory, not the configured size, set the pool, "
+                    "so this run would not match the others")
             sys.exit(1)
         if not server.plugin_loaded(rd.out / "preempt.jsonl", t_start):
             rd.note("the preemption plugin did not load, so rebuild measures would be empty; check that vllm runs from the "

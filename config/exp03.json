@@ -1,0 +1,553 @@
+{
+ "experiment": "Exp03, the every-trace test, written before any of its cells ran (25 November 2026). Exp02 tested the gate on one trace at one load against one hand-picked watermark. Vizuara's claim is that one fixed gate setting holds on every trace without tuning. Exp03 runs the same gate setting, unchanged from Exp02, on two traces (long reasoning, chat) at 2.5x and 4x and on a load surge, against fixed watermarks of 10% and 20%, with the same harness, engine flags, C and calibration rules.",
+ "model": {
+  "repo": "Qwen/Qwen3-8B",
+  "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+  "licence": "apache-2.0"
+ },
+ "engine": {
+  "name": "vLLM 0.32.0, git tag v0.32.0 = commit 5df63a7203cdb9328d824a27b682e77c7b9928be, installed from requirements-vllm.lock.txt",
+  "gpu": "one L40S in our run",
+  "kv_tokens": 190000,
+  "kv_note": "KV fixed with --kv-cache-memory-bytes = tokens * 147456 (Qwen3-8B in BF16: K and V, 36 layers, 8 KV heads, head dim 128, 2 bytes)",
+  "flags": "--max-model-len 40960 --max-num-seqs 256 --max-num-batched-tokens 8192 --block-size 16 --no-enable-prefix-caching --seed 0; stock FCFS scheduling, newest-first preemption, recompute mode",
+  "instrumentation": "plugin/acr_preemptlog.py, a vLLM general plugin: one JSON line per _preempt_request call and one per prefix-cache lookup of a preempted request (with caching off the lookup still runs and returns a hit of 0); it changes no decision"
+ },
+ "harness": {
+  "admitperf": "github.com/harshuljain13/AdmitPerf at commit 5bcb81c30ba5639c3d2c35ff91b5a937436cc751, admitperf/core vendored (standard library only); every proxy decision goes through admitperf.Policy and is logged in its format",
+  "replayer": "harness/replay.py"
+ },
+ "traces": {
+  "source": "github.com/alibaba-edu/qwen-bailian-usagetraces-anon at commit 5f7439c51ec248a0c585f7d90a41a6f57773b912, Apache-2.0",
+  "thinking_long": "data/thinking_long.jsonl (sha256 1966241ffa366f8420aae54875bdea11fbad37c6977d366c8b4d49b591499939), built by tools/make_requests.py",
+  "filter": "L_raw >= 2000 and p + min(L_raw, 16000) <= 40896; outputs clipped at 16,000; 622 requests, used in a fixed shuffled order, wrapping if a cell needs more (flagged)",
+  "prompts": "token IDs from the trace's 16-token block hashes",
+  "lengths": "every arm sends max_tokens = clipped output length with ignore_eos and temperature 0; only the known-length arm reads the length for admission",
+  "chat": "data/chat.jsonl, the To-C chat trace qwen_traceA_blksz_16.jsonl, step 1 of tools/make_requests.py only (same filter, shuffle and first 1,500; no length filter); sha256 in data/manifest.json"
+ },
+ "calibration": {
+  "PF": "cold prefill rate: median of tokens / TTFT over prompts of 8,192 and 16,384 tokens",
+  "tau_full": "decode step time near a full cache: 24 requests of 6,000 prompt and 1,600 output tokens at once",
+  "tau_single": "decode step time of one request alone (reported)",
+  "eviction": "30 requests of 5,000 prompt and 3,000 output tokens at once, up to 420 s (reported, not gated)"
+ },
+ "load": {
+  "capacity": "lam_cap = min(lam_KV, lam_PF) per trace, as in Exp02",
+  "arrivals": "Poisson at load * lam_cap for the whole cell, random.Random(arrival_seed); the same arrivals and requests for every arm at a given load, including the A/A repeats",
+  "surge": "a surge cell lists [t_start_s, load] steps; arrivals are Poisson at load * lam_cap within each step, random.Random(arrival_seed), the same for every arm"
+ },
+ "cell": {
+  "wall_s": 1260,
+  "count_window_s": 720,
+  "overhead_s": 60,
+  "end": "at 1,260 s every open stream is cancelled; only requests that arrived before 720 s are counted; requests still streaming are censored and their share is reported",
+  "between_cells": "wait until the engine has no running or waiting request (up to 120 s), then POST /reset_prefix_cache (a no-op with caching off)"
+ },
+ "validity_min_wall_s": 1240,
+ "slo": {
+  "ttft_s": 30.0,
+  "tpot_s": 0.15,
+  "abandonment": "a request with no first token 30 s after arrival is dropped by its client"
+ },
+ "arms": {
+  "stock": "the proxy forwards every request on arrival; vLLM admits when the prompt fits",
+  "wm10": "proxy FIFO; pass the head when used + prompt + 0.10 C <= C",
+  "gate": "proxy FIFO; pass the head when used + prompt + h <= C; every window_s seconds h = max(0, h + K (W/window_s - alpha)); W is the proxy's own estimate of rebuild GPU seconds, each preemption costing (prompt + tokens streamed) / PF",
+  "known": "proxy FIFO; pass the head when used + prompt <= C and the projected peak of all admitted unfinished requests plus the candidate, with exact remaining lengths, is <= C",
+  "common_to_proxy_arms": "every proxy arm also holds the head while the engine has preempted requests waiting",
+  "door": "an optional front door that refuses a request on arrival when the queued work, estimated from recent output lengths, would wait more than 0.8 times the TTFT limit",
+  "wm20": "as wm10 with 0.20 C kept free"
+ },
+ "gate": {
+  "alpha": 0.01,
+  "K_fraction_of_C": 0.2,
+  "window_s": 2.0
+ },
+ "core_cells": [
+  "T_stock_25",
+  "T_gate_25",
+  "T_wm10_25",
+  "T_wm20_25",
+  "T_known_25",
+  "T_stock_40",
+  "T_gate_40",
+  "T_wm10_40",
+  "T_wm20_40",
+  "T_known_40",
+  "C_stock_25",
+  "C_gate_25",
+  "C_wm10_25",
+  "C_wm20_25",
+  "C_stock_40",
+  "C_gate_40",
+  "C_wm10_40",
+  "C_wm20_40",
+  "T_stock_surge",
+  "T_gate_surge",
+  "T_wm10_surge",
+  "T_wm20_surge"
+ ],
+ "cells": [
+  {
+   "name": "T_stock_25",
+   "arm": "stock",
+   "trace": "thinking_long",
+   "load": 2.5,
+   "arrival_seed": 3425
+  },
+  {
+   "name": "T_gate_25",
+   "arm": "gate",
+   "trace": "thinking_long",
+   "load": 2.5,
+   "arrival_seed": 3425
+  },
+  {
+   "name": "T_wm10_25",
+   "arm": "wm10",
+   "trace": "thinking_long",
+   "load": 2.5,
+   "arrival_seed": 3425
+  },
+  {
+   "name": "T_wm20_25",
+   "arm": "wm20",
+   "trace": "thinking_long",
+   "load": 2.5,
+   "arrival_seed": 3425
+  },
+  {
+   "name": "T_known_25",
+   "arm": "known",
+   "trace": "thinking_long",
+   "load": 2.5,
+   "arrival_seed": 3425
+  },
+  {
+   "name": "T_stock_40",
+   "arm": "stock",
+   "trace": "thinking_long",
+   "load": 4.0,
+   "arrival_seed": 3440
+  },
+  {
+   "name": "T_gate_40",
+   "arm": "gate",
+   "trace": "thinking_long",
+   "load": 4.0,
+   "arrival_seed": 3440
+  },
+  {
+   "name": "T_wm10_40",
+   "arm": "wm10",
+   "trace": "thinking_long",
+   "load": 4.0,
+   "arrival_seed": 3440
+  },
+  {
+   "name": "T_wm20_40",
+   "arm": "wm20",
+   "trace": "thinking_long",
+   "load": 4.0,
+   "arrival_seed": 3440
+  },
+  {
+   "name": "T_known_40",
+   "arm": "known",
+   "trace": "thinking_long",
+   "load": 4.0,
+   "arrival_seed": 3440
+  },
+  {
+   "name": "C_stock_25",
+   "arm": "stock",
+   "trace": "chat",
+   "load": 2.5,
+   "arrival_seed": 3525
+  },
+  {
+   "name": "C_gate_25",
+   "arm": "gate",
+   "trace": "chat",
+   "load": 2.5,
+   "arrival_seed": 3525
+  },
+  {
+   "name": "C_wm10_25",
+   "arm": "wm10",
+   "trace": "chat",
+   "load": 2.5,
+   "arrival_seed": 3525
+  },
+  {
+   "name": "C_wm20_25",
+   "arm": "wm20",
+   "trace": "chat",
+   "load": 2.5,
+   "arrival_seed": 3525
+  },
+  {
+   "name": "C_stock_40",
+   "arm": "stock",
+   "trace": "chat",
+   "load": 4.0,
+   "arrival_seed": 3540
+  },
+  {
+   "name": "C_gate_40",
+   "arm": "gate",
+   "trace": "chat",
+   "load": 4.0,
+   "arrival_seed": 3540
+  },
+  {
+   "name": "C_wm10_40",
+   "arm": "wm10",
+   "trace": "chat",
+   "load": 4.0,
+   "arrival_seed": 3540
+  },
+  {
+   "name": "C_wm20_40",
+   "arm": "wm20",
+   "trace": "chat",
+   "load": 4.0,
+   "arrival_seed": 3540
+  },
+  {
+   "name": "T_stock_surge",
+   "arm": "stock",
+   "trace": "thinking_long",
+   "load": 4.0,
+   "surge": [
+    [
+     0,
+     1.0
+    ],
+    [
+     300,
+     4.0
+    ],
+    [
+     600,
+     1.0
+    ]
+   ],
+   "arrival_seed": 3450
+  },
+  {
+   "name": "T_gate_surge",
+   "arm": "gate",
+   "trace": "thinking_long",
+   "load": 4.0,
+   "surge": [
+    [
+     0,
+     1.0
+    ],
+    [
+     300,
+     4.0
+    ],
+    [
+     600,
+     1.0
+    ]
+   ],
+   "arrival_seed": 3450
+  },
+  {
+   "name": "T_wm10_surge",
+   "arm": "wm10",
+   "trace": "thinking_long",
+   "load": 4.0,
+   "surge": [
+    [
+     0,
+     1.0
+    ],
+    [
+     300,
+     4.0
+    ],
+    [
+     600,
+     1.0
+    ]
+   ],
+   "arrival_seed": 3450
+  },
+  {
+   "name": "T_wm20_surge",
+   "arm": "wm20",
+   "trace": "thinking_long",
+   "load": 4.0,
+   "surge": [
+    [
+     0,
+     1.0
+    ],
+    [
+     300,
+     4.0
+    ],
+    [
+     600,
+     1.0
+    ]
+   ],
+   "arrival_seed": 3450
+  },
+  {
+   "name": "T_stock_25_s2",
+   "arm": "stock",
+   "trace": "thinking_long",
+   "load": 2.5,
+   "arrival_seed": 4425
+  },
+  {
+   "name": "T_gate_25_s2",
+   "arm": "gate",
+   "trace": "thinking_long",
+   "load": 2.5,
+   "arrival_seed": 4425
+  },
+  {
+   "name": "T_wm10_25_s2",
+   "arm": "wm10",
+   "trace": "thinking_long",
+   "load": 2.5,
+   "arrival_seed": 4425
+  },
+  {
+   "name": "T_wm20_25_s2",
+   "arm": "wm20",
+   "trace": "thinking_long",
+   "load": 2.5,
+   "arrival_seed": 4425
+  },
+  {
+   "name": "T_stock_40_s2",
+   "arm": "stock",
+   "trace": "thinking_long",
+   "load": 4.0,
+   "arrival_seed": 4440
+  },
+  {
+   "name": "T_gate_40_s2",
+   "arm": "gate",
+   "trace": "thinking_long",
+   "load": 4.0,
+   "arrival_seed": 4440
+  },
+  {
+   "name": "T_wm10_40_s2",
+   "arm": "wm10",
+   "trace": "thinking_long",
+   "load": 4.0,
+   "arrival_seed": 4440
+  },
+  {
+   "name": "T_wm20_40_s2",
+   "arm": "wm20",
+   "trace": "thinking_long",
+   "load": 4.0,
+   "arrival_seed": 4440
+  },
+  {
+   "name": "T_stock_surge_s2",
+   "arm": "stock",
+   "trace": "thinking_long",
+   "load": 4.0,
+   "surge": [
+    [
+     0,
+     1.0
+    ],
+    [
+     300,
+     4.0
+    ],
+    [
+     600,
+     1.0
+    ]
+   ],
+   "arrival_seed": 4450
+  },
+  {
+   "name": "T_gate_surge_s2",
+   "arm": "gate",
+   "trace": "thinking_long",
+   "load": 4.0,
+   "surge": [
+    [
+     0,
+     1.0
+    ],
+    [
+     300,
+     4.0
+    ],
+    [
+     600,
+     1.0
+    ]
+   ],
+   "arrival_seed": 4450
+  },
+  {
+   "name": "T_wm10_surge_s2",
+   "arm": "wm10",
+   "trace": "thinking_long",
+   "load": 4.0,
+   "surge": [
+    [
+     0,
+     1.0
+    ],
+    [
+     300,
+     4.0
+    ],
+    [
+     600,
+     1.0
+    ]
+   ],
+   "arrival_seed": 4450
+  },
+  {
+   "name": "T_wm20_surge_s2",
+   "arm": "wm20",
+   "trace": "thinking_long",
+   "load": 4.0,
+   "surge": [
+    [
+     0,
+     1.0
+    ],
+    [
+     300,
+     4.0
+    ],
+    [
+     600,
+     1.0
+    ]
+   ],
+   "arrival_seed": 4450
+  }
+ ],
+ "order": "cells run in the listed order, with the G3 retry (if any) placed right after the six core cells",
+ "in_run": {
+  "g1_cell": "T_stock_25",
+  "g3_cell": "T_gate_25",
+  "g3_retry_cell": "T_gate_25_gain",
+  "g1_rule": "if G1 fails on T_stock_25, the run stops there and the label is G1_FAIL",
+  "g3_rule": "if T_gate_25 misses G3, one extra cell with K multiplied by gain_up = 4 if its rebuild share is above 1.5%, otherwise by gain_down = 0.25; reported beside the pre-registered cell; G3 and G4 use the pre-registered cell",
+  "gain_up": 4.0,
+  "gain_down": 0.25
+ },
+ "metrics": {
+  "goodput_rps": "requests that arrived before 720 s, finished by 1,260 s, with TTFT <= 30 s and mean TPOT ((t_last - t_first) / (n - 1)) <= 0.15 s, divided by 720 s",
+  "goodput_tok_s": "output tokens of those requests / 720 s (reported)",
+  "goodput_rps_incl_on_track": "as goodput_rps, also counting censored requests that were inside both limits when the cell ended (reported)",
+  "rebuild_share": "sum over the cell's preemptions of the tokens rebuilt at resume (request tokens minus the prefix-cache hit at its last lookup, which is 0 with caching off; 0 if never resumed), divided by PF, over the cell's wall time",
+  "rebuild_share_no_hits": "as rebuild_share, counting every token held at preemption as rebuilt (reported)",
+  "interrupted_share": "share of finished counted requests that were preempted at least once",
+  "kv_ge_095_share": "share of metric samples with vllm:kv_cache_usage_perc >= 0.95",
+  "proxy_estimate_share": "the proxy's own rebuild estimate over wall time, to compare with rebuild_share (reported)"
+ },
+ "gates": {
+  "G1": {
+   "statement": "the signal lives",
+   "cell": "T_stock_25",
+   "kv_share_min": 0.5,
+   "pass": "kv_ge_095_share >= 0.5 and vllm:num_preemptions_total increased during the cell"
+  },
+  "G2": {
+   "statement": "the failure exists",
+   "pass": "goodput_rps(T_stock_25) <= 0.85 * goodput_rps(T_stock_10), or interrupted_share(T_stock_25) >= 0.20"
+  },
+  "G3": {
+   "statement": "the budget holds",
+   "share_max": 0.015,
+   "goodput_vs_stock_min": 1.1,
+   "pass": "rebuild_share(T_gate_25) <= 0.015 and goodput_rps(T_gate_25) >= 1.1 * goodput_rps(T_stock_25)"
+  },
+  "G4": {
+   "statement": "the distance",
+   "distance": "1 - goodput_rps(T_gate_25) / goodput_rps(T_known_25)",
+   "labels": {
+    "PREDICTION_NOT_NEEDED": "distance < 0.15",
+    "PREDICTION_MATTERS": "distance > 0.30",
+    "DECIDE_AFTER_THREE_TRACES": "0.15 to 0.30"
+   },
+   "watermark_flag": "WATERMARK_WITHIN_NOISE if |goodput_rps(T_wm10_25) - goodput_rps(T_gate_25)| <= |goodput_rps(T_stock_25_AA) - goodput_rps(T_stock_25)|; reported whatever the distance"
+  },
+  "validity": "a cell is invalid if it ran under 1,240 s, or more than 5% of its counted requests ended in error or short; a gate whose cells are invalid or missing reads INCONCLUSIVE"
+ },
+ "outcomes": {
+  "G1_FAIL": "G1 fails: KV does not bind in this setup",
+  "NO_FAILURE": "G1 passes, G2 fails: even with full rebuilds KV growth does little harm on this engine",
+  "GATE_MISSES": "G1 and G2 pass, G3 fails: report what happened, with the one gain change",
+  "PASS_<G4 label>": "G1, G2 and G3 pass; the G4 label names the headline",
+  "INCONCLUSIVE": "a gate needed for the label reads INCONCLUSIVE"
+ },
+ "smoke": {
+  "cells": [
+   "T_stock_25",
+   "T_gate_25",
+   "T_known_25",
+   "T_wm10door_25"
+  ],
+  "wall_s": 120,
+  "count_window_s": 80,
+  "evict_wall_s": 150,
+  "note": "plumbing check only, written to smoke/, never counted"
+ },
+ "id": "exp03",
+ "steps": {
+  "1": [
+   "T_stock_25",
+   "T_gate_25"
+  ],
+  "2": [
+   "T_wm10_25",
+   "T_wm20_25",
+   "T_known_25",
+   "T_stock_40",
+   "T_gate_40",
+   "T_wm10_40",
+   "T_wm20_40",
+   "T_known_40",
+   "C_stock_25",
+   "C_gate_25",
+   "C_wm10_25",
+   "C_wm20_25",
+   "C_stock_40",
+   "C_gate_40",
+   "C_wm10_40",
+   "C_wm20_40"
+  ],
+  "3": [
+   "T_stock_surge",
+   "T_gate_surge",
+   "T_wm10_surge",
+   "T_wm20_surge"
+  ],
+  "4": "stock, gate and the better of wm10/wm20 by step 2-3 goodput, with _s2 seeds, at 2.5x, 4x and surge"
+ },
+ "step1_reproduction": {
+  "statement": "our Modal vLLM run reproduces Raj's Exp02",
+  "pass": "T_stock_25 and T_gate_25 each within 15% of Raj's Exp02 good-request counts over the 720 s window (stock 68, gate 63), T_stock_25 interrupted_share >= 0.20, T_gate_25 rebuild_share <= 0.015; otherwise stop and report"
+ },
+ "decision": {
+  "score": "for every arm: goodput at a 5 s hold limit and p90 of hold including the engine queue (tools/rescore.py), with abandoned, rejected and censored rates reported beside them",
+  "settings": "T 2.5x, T 4x, C 2.5x, C 4x, T surge",
+  "kill_rule": "if one fixed watermark (wm10 or wm20, the same one in every setting) is within 5% of the gate on goodput and no more than 5% worse on hold p90 in all five settings, the answer is: a fixed watermark is enough",
+  "gate_wins": "otherwise, if the gate is within 5% of the best watermark for that setting in all five settings while each fixed watermark is more than 5% worse than the gate in at least one, the answer is: one gate setting holds where no one watermark does",
+  "else": "report the table; neither claim"
+ }
+}

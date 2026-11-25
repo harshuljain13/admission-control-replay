@@ -125,6 +125,49 @@ def test_cell_configs_and_rates():
     assert [c["cell"] for c in one] == ["T_known_25", "T_stock_25"]
 
 
+def test_chat_data_matches_manifest():
+    t = json.loads((ROOT / "data" / "manifest.json").read_text())["traces"]["chat"]
+    raw = (ROOT / "data" / "chat.jsonl").read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == t["out_sha256"] and len(replay.load_reqs(ROOT / "data" / "chat.jsonl")) == 1500
+
+
+def test_watermark_arms():
+    cls, params = replay.arm_policy("wm20")
+    assert params == dict(frac=0.20) and cls.name == "watermark_20pct" and issubclass(cls, replay.Watermark)
+    assert replay.arm_policy("wm10") == (replay.Watermark, dict(frac=0.10))
+    with tempfile.TemporaryDirectory() as tmp:
+        wm = _policy(cls, tmp, **params)
+        base = {"acr:C": 1000.0, "acr:used_est": 650.0, "acr:cand_prompt": 100.0, "acr:preempted_waiting": 0.0}
+        assert wm(base, request_id="a").admitted and not wm(dict(base, **{"acr:used_est": 701.0}), request_id="b").admitted
+        wm.close()
+
+
+def test_piecewise_arrivals():
+    arr = replay.piecewise_arrivals([[0, 1.0], [300, 4.0], [600, 1.0]], 1260, 622, 3450)
+    n = [sum(1 for t, _ in arr if a <= t < b) for a, b in ((0, 300), (300, 600), (600, 1260))]
+    assert 240 < n[0] < 360 and 1080 < n[1] < 1320 and 560 < n[2] < 760
+    assert all(a[0] < b[0] for a, b in zip(arr, arr[1:])) and [k for _, k in arr[:3]] == [0, 1, 2]
+    assert replay.piecewise_arrivals([[0, 2.0]], 500, 9, 7) == replay.poisson_arrivals(2.0, 500, 9, 7)
+
+
+def test_exp03_cells():
+    rule = json.loads((ROOT / "config" / "exp03.json").read_text())
+    cal = dict(PF=10000.0, tau_full=0.05)
+    rates = run.rates_from(cal, 190000)
+    cfgs = {c["cell"]: c for c in run.cell_cfgs(rule, rates, 190000, cal)}
+    assert len(rule["steps"]["2"]) == 16 and len(rule["steps"]["3"]) == 4 and set(rule["core_cells"]) <= set(cfgs)
+    old = {c["cell"]: c for c in run.cell_cfgs(RULE, rates, 190000, cal)}
+    for n in ("T_stock_25", "T_gate_25", "T_known_25", "T_wm10_25"):
+        a, b = cfgs[n], old[n]
+        assert all(a[k] == b[k] for k in ("arm", "trace", "load", "rate", "arrival_seed", "K", "alpha", "window_s", "wall_s"))
+    assert cfgs["T_gate_25"]["experiment"] == "exp03" and cfgs["T_gate_40"]["rate"] == 4.0 * rates["thinking_long"]["lam_cap"]
+    assert cfgs["C_wm20_40"]["rate"] == 4.0 * rates["chat"]["lam_cap"] and cfgs["C_wm20_40"]["segments"] is None
+    cap = rates["thinking_long"]["lam_cap"]
+    assert cfgs["T_gate_surge"]["segments"] == [[0, cap], [300, 4.0 * cap], [600, cap]]
+    assert cfgs["T_gate_surge_s2"]["arrival_seed"] == 4450 and all(cfgs[n]["arm"] in ("stock", "gate", "wm10", "wm20", "known")
+                                                                     for n in cfgs)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

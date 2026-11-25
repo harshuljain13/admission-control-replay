@@ -250,8 +250,7 @@ class Cell:
         self.recent_L = []
         self.rejected = 0
         self.wake = asyncio.Event()
-        pol_cls = dict(stock=Stock, wm10=Watermark, gate=BudgetGate, known=KnownLength)[self.arm]
-        params = dict(frac=0.10) if self.arm == "wm10" else {}
+        pol_cls, params = arm_policy(self.arm)
         if self.arm == "gate":
             params = dict(alpha=cfg["alpha"], K=cfg["K"], window_s=cfg["window_s"])
         self.policy = pol_cls(log=str(self.out_dir / "decisions.jsonl"), experiment=cfg.get("experiment", "exp02"), run=cfg["cell"],
@@ -445,9 +444,38 @@ def poisson_arrivals(rate, wall_s, n_avail, seed):
     return out
 
 
+def piecewise_arrivals(segments, wall_s, n_avail, seed):
+    """Poisson arrivals whose rate steps at given times: segments = [(t_start, rate), ...], first t_start 0. Each
+    segment draws from the same generator, restarting at its start time (memoryless, so this is exact)."""
+    rng = random.Random(seed)
+    out, k = [], 0
+    bounds = [s[0] for s in segments[1:]] + [wall_s]
+    for (t0, rate), t1 in zip(segments, bounds):
+        t = t0
+        while True:
+            t += rng.expovariate(rate)
+            if t >= min(t1, wall_s):
+                break
+            out.append((t, k % n_avail))
+            k += 1
+    return out
+
+
+def arm_policy(arm):
+    """stock | gate | known | wmNN (a watermark keeping NN% of C free)."""
+    if arm.startswith("wm"):
+        pct = int(arm[2:])
+        cls = Watermark if pct == 10 else type(f"Watermark{pct}", (Watermark,), dict(name=f"watermark_{pct}pct"))
+        return cls, dict(frac=pct / 100)
+    return dict(stock=Stock, gate=BudgetGate, known=KnownLength)[arm], {}
+
+
 async def run_cell(cfg, reqs, out_dir):
     Path(out_dir).mkdir(parents=True, exist_ok=True)
-    arrivals = poisson_arrivals(cfg["rate"], cfg["wall_s"], len(reqs), cfg["arrival_seed"])
+    if cfg.get("segments"):
+        arrivals = piecewise_arrivals(cfg["segments"], cfg["wall_s"], len(reqs), cfg["arrival_seed"])
+    else:
+        arrivals = poisson_arrivals(cfg["rate"], cfg["wall_s"], len(reqs), cfg["arrival_seed"])
     conn = aiohttp.TCPConnector(limit=0)
     async with aiohttp.ClientSession(connector=conn, timeout=aiohttp.ClientTimeout(total=None, sock_read=600)) as s:
         cell = Cell(cfg, reqs, out_dir, s)

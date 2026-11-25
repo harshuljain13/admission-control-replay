@@ -70,9 +70,10 @@ async def _run(tmp):
     cells = {}
     try:
         for name, arm, door in (("T_stock_25", "stock", False), ("T_gate_25", "gate", False), ("T_known_25", "known", False),
-                                ("T_wm10door_25", "wm10", True)):
+                                ("T_wm10door_25", "wm10", True), ("T_wm20_surge", "wm20", False)):
             cfg = dict(cell=name, arm=arm, door=door, trace="thinking", load=1.0, rate=8.0, arrival_seed=1, wall_s=6.0, C=C,
-                       PF=8000.0, TAU=0.004, alpha=0.01, K=4000.0, window_s=1.0, count_window_s=4.0)
+                       PF=8000.0, TAU=0.004, alpha=0.01, K=4000.0, window_s=1.0, count_window_s=4.0,
+                       segments=[[0, 4.0], [2.0, 16.0], [4.0, 4.0]] if name.endswith("surge") else None)
             res = await replay.run_cell(cfg, reqs, f"{tmp}/cells_{C}/{name}")
             m = measure.cell_measures(res, [], cfg["PF"], C)
             decisions = Path(f"{tmp}/cells_{C}/{name}/decisions.jsonl").read_text().splitlines()

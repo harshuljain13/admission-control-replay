@@ -10,6 +10,11 @@ Step 1, as in our first experiment: keep rows with output_length > 0 and input_l
 (the Qwen3-8B context of 40,960 less 64), shuffle with random.Random(34) and keep the first 1,500.
 Step 2, for Exp02: keep, in the same order, the requests whose trace output is at least 2,000 tokens. That leaves 622.
 Both steps are checked against the SHA-256 values in data/manifest.json, and the output must match byte for byte.
+
+    python -I tools/make_requests.py TRACE_DIR chat
+
+builds data/chat.jsonl for Exp03 from the To-C chat trace (qwen_traceA_blksz_16.jsonl) with step 1 only: the same
+filter, shuffle and first 1,500. Its SHA-256 and statistics go into data/manifest.json.
 """
 import hashlib
 import json
@@ -19,6 +24,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
 FILE, FILE_SHA = "qwen_thinking_blksz_16.jsonl", "41ac36d9d1b54d084eeb6b05e9d142ba9d02f8bf79cfc9fff418d8ab7cdee906"
+CHAT_FILE = "qwen_traceA_blksz_16.jsonl"
 STEP1_SHA = "f243ce58dbbf9df1a1e3768ad55eae21bed62b8b6bfa66f9bc3752f0fea30ec3"
 KEEP1, MIN_OUT, OUTCAP, CTX = 1500, 2000, 16000, 40960 - 64
 
@@ -65,7 +71,27 @@ def main(tdir):
     print("reproduced data/thinking_long.jsonl:", json.dumps(stats(out)))
 
 
+def chat(tdir):
+    raw = (Path(tdir) / CHAT_FILE).read_bytes()
+    out = step1(raw)
+    text = dumps(out).encode()
+    path = HERE / "data" / "manifest.json"
+    man = json.loads(path.read_text())
+    entry = dict(file="chat.jsonl", source_file=CHAT_FILE, source_sha256=hashlib.sha256(raw).hexdigest(),
+                 step="step 1 only: the same filter, random.Random(34) shuffle and first 1,500 as thinking",
+                 out_sha256=hashlib.sha256(text).hexdigest(), **stats(out))
+    want = man["traces"].get("chat", {}).get("out_sha256")
+    assert want in (None, entry["out_sha256"]), "data/chat.jsonl does not reproduce the manifest"
+    man["traces"]["chat"] = entry
+    (HERE / "data" / "chat.jsonl").write_bytes(text)
+    path.write_text(json.dumps(man, indent=1) + "\n")
+    print("wrote data/chat.jsonl:", json.dumps(stats(out)))
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
+    if len(sys.argv) == 3 and sys.argv[2] == "chat":
+        chat(sys.argv[1])
+    elif len(sys.argv) == 2:
+        main(sys.argv[1])
+    else:
         sys.exit(__doc__)
-    main(sys.argv[1])

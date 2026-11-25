@@ -23,6 +23,18 @@
    "L_median": 4085,
    "memtime_tokens_steps_mean": 42859083.11334405,
    "out_sha256": "1966241ffa366f8420aae54875bdea11fbad37c6977d366c8b4d49b591499939"
+  },
+  "chat": {
+   "file": "chat.jsonl",
+   "source_file": "qwen_traceA_blksz_16.jsonl",
+   "source_sha256": "07cedc9ed8aff301994ac68ed4aede8123b7603673575eeba9dd677de663db17",
+   "step": "step 1 only: the same filter, random.Random(34) shuffle and first 1,500 as thinking",
+   "out_sha256": "2bee9e0da1235e79b2329bf93ad9793b491d7ec689305d9f523d089327892c65",
+   "written": 1500,
+   "p_mean": 2382.4673333333335,
+   "L_clipped_mean": 425.95866666666666,
+   "L_median": 378,
+   "memtime_tokens_steps_mean": 1458849.7633333334
   }
  }
 }
