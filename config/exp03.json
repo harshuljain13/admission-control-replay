@@ -518,6 +518,70 @@
     ]
    ],
    "arrival_seed": 3601
+  },
+  {
+   "name": "Cm_stock_25",
+   "arm": "stock",
+   "trace": "chat",
+   "load": 2.5,
+   "arrival_seed": 3525,
+   "cap_rps": 1.1481
+  },
+  {
+   "name": "Cm_gate_25",
+   "arm": "gate",
+   "trace": "chat",
+   "load": 2.5,
+   "arrival_seed": 3525,
+   "cap_rps": 1.1481
+  },
+  {
+   "name": "Cm_wm10_25",
+   "arm": "wm10",
+   "trace": "chat",
+   "load": 2.5,
+   "arrival_seed": 3525,
+   "cap_rps": 1.1481
+  },
+  {
+   "name": "Cm_wm20_25",
+   "arm": "wm20",
+   "trace": "chat",
+   "load": 2.5,
+   "arrival_seed": 3525,
+   "cap_rps": 1.1481
+  },
+  {
+   "name": "Cm_stock_40",
+   "arm": "stock",
+   "trace": "chat",
+   "load": 4.0,
+   "arrival_seed": 3540,
+   "cap_rps": 1.1481
+  },
+  {
+   "name": "Cm_gate_40",
+   "arm": "gate",
+   "trace": "chat",
+   "load": 4.0,
+   "arrival_seed": 3540,
+   "cap_rps": 1.1481
+  },
+  {
+   "name": "Cm_wm10_40",
+   "arm": "wm10",
+   "trace": "chat",
+   "load": 4.0,
+   "arrival_seed": 3540,
+   "cap_rps": 1.1481
+  },
+  {
+   "name": "Cm_wm20_40",
+   "arm": "wm20",
+   "trace": "chat",
+   "load": 4.0,
+   "arrival_seed": 3540,
+   "cap_rps": 1.1481
   }
  ],
  "order": "cells run in the listed order, with the G3 retry (if any) placed right after the six core cells",
@@ -639,6 +703,7 @@
   "also": "T_stock_25_AA: vLLM A/A repeat of T_stock_25 (same arrivals); T_<arm>_40_s2 for stock, gate, wm10, wm20 (second seed at 4x)",
   "decision": "the five-setting rule is applied with C 2.5x and C 4x taken from the Cm cells; because hold p90 sits at the 30 s abandonment limit when more than 10% abandon, hold p99 is reported beside it, and the rule is also reported with p99 in place of p90 (a change made after seeing seed-1 results, labelled as such)",
   "probe_result_1": "C_probe passed every step up to its top, 0.5 x formula lam_cap = 1.148 rps (no request abandoned, TTFT p90 <= 1.4 s, KV mean <= 0.40), so it bounds capacity from below only",
-  "probe2": "C_probe2: same rule, steps 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2 x formula lam_cap; capacity = the highest passing step under the same rule (if every step passes, capacity is reported as >= 1.2 x formula and the rerun uses the formula unchanged)"
+  "probe2": "C_probe2: same rule, steps 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2 x formula lam_cap; capacity = the highest passing step under the same rule (if every step passes, capacity is reported as >= 1.2 x formula and the rerun uses the formula unchanged)",
+  "probe_result_2": "C_probe2 measured chat capacity = 1.1481 rps (highest step passing the rule); Cm cells use cap_rps = 1.1481"
  }
 }
