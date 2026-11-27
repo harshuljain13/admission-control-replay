@@ -166,6 +166,11 @@ def test_exp03_cells():
     assert cfgs["T_gate_surge"]["segments"] == [[0, cap], [300, 4.0 * cap], [600, cap]]
     assert cfgs["T_gate_surge_s2"]["arrival_seed"] == 4450 and all(cfgs[n]["arm"] in ("stock", "gate", "wm10", "wm20", "known")
                                                                      for n in cfgs)
+    ccap = rates["chat"]["lam_cap"]
+    assert cfgs["C_probe"]["segments"][0] == [0, 0.15 * ccap] and cfgs["C_probe"]["segments"][-1] == [1080, 0.5 * ccap]
+    assert cfgs["T_stock_25_AA"]["rate"] == cfgs["T_stock_25"]["rate"] and cfgs["T_stock_25_AA"]["arrival_seed"] == 3425
+    probe = dict(rule, cells=[dict(name="Cm_gate_25", arm="gate", trace="chat", load=2.5, arrival_seed=3525, cap_rps=0.7)])
+    assert run.cell_cfgs(probe, rates, 190000, cal)[0]["rate"] == 2.5 * 0.7
 
 
 if __name__ == "__main__":

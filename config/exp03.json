@@ -437,6 +437,87 @@
     ]
    ],
    "arrival_seed": 4450
+  },
+  {
+   "name": "C_probe",
+   "arm": "stock",
+   "trace": "chat",
+   "load": 0.5,
+   "surge": [
+    [
+     0,
+     0.15
+    ],
+    [
+     180,
+     0.2
+    ],
+    [
+     360,
+     0.25
+    ],
+    [
+     540,
+     0.3
+    ],
+    [
+     720,
+     0.35
+    ],
+    [
+     900,
+     0.4
+    ],
+    [
+     1080,
+     0.5
+    ]
+   ],
+   "arrival_seed": 3600
+  },
+  {
+   "name": "T_stock_25_AA",
+   "arm": "stock",
+   "trace": "thinking_long",
+   "load": 2.5,
+   "arrival_seed": 3425
+  },
+  {
+   "name": "C_probe2",
+   "arm": "stock",
+   "trace": "chat",
+   "load": 1.2,
+   "surge": [
+    [
+     0,
+     0.5
+    ],
+    [
+     180,
+     0.6
+    ],
+    [
+     360,
+     0.7
+    ],
+    [
+     540,
+     0.8
+    ],
+    [
+     720,
+     0.9
+    ],
+    [
+     900,
+     1.0
+    ],
+    [
+     1080,
+     1.2
+    ]
+   ],
+   "arrival_seed": 3601
   }
  ],
  "order": "cells run in the listed order, with the G3 retry (if any) placed right after the six core cells",
@@ -549,5 +630,15 @@
   "kill_rule": "if one fixed watermark (wm10 or wm20, the same one in every setting) is within 5% of the gate on goodput and no more than 5% worse on hold p90 in all five settings, the answer is: a fixed watermark is enough",
   "gate_wins": "otherwise, if the gate is within 5% of the best watermark for that setting in all five settings while each fixed watermark is more than 5% worse than the gate in at least one, the answer is: one gate setting holds where no one watermark does",
   "else": "report the table; neither claim"
+ },
+ "amendment_2026_11_27": {
+  "why": "seed-1 chat cells were not at 2.5x and 4x: lam_cap = min(lam_KV, lam_PF) treats KV and prefill as separate limits, but on chat prefill and decode share the GPU (TPOT 0.2-0.4 s vs tau_full 0.057 s), so 73-98% of requests abandoned in every arm. Those 8 cells are kept and reported as invalid, not deleted.",
+  "probe": "C_probe: stock arm, chat trace, Poisson arrivals stepping every 180 s through 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5 x the formula lam_cap; analysis/probe.py scores each step",
+  "capacity_rule": "chat capacity = the highest probe step rate at which that step and every lower step have abandoned share <= 2% and TTFT p90 <= 5 s, over requests arriving in the step (written before the probe ran)",
+  "rerun": "Cm_<arm>_<25|40>: the 8 chat cells again, same arms and arrival seeds, with cap_rps = the measured chat capacity",
+  "also": "T_stock_25_AA: vLLM A/A repeat of T_stock_25 (same arrivals); T_<arm>_40_s2 for stock, gate, wm10, wm20 (second seed at 4x)",
+  "decision": "the five-setting rule is applied with C 2.5x and C 4x taken from the Cm cells; because hold p90 sits at the 30 s abandonment limit when more than 10% abandon, hold p99 is reported beside it, and the rule is also reported with p99 in place of p90 (a change made after seeing seed-1 results, labelled as such)",
+  "probe_result_1": "C_probe passed every step up to its top, 0.5 x formula lam_cap = 1.148 rps (no request abandoned, TTFT p90 <= 1.4 s, KV mean <= 0.40), so it bounds capacity from below only",
+  "probe2": "C_probe2: same rule, steps 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2 x formula lam_cap; capacity = the highest passing step under the same rule (if every step passes, capacity is reported as >= 1.2 x formula and the rerun uses the formula unchanged)"
  }
 }

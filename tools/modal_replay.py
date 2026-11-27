@@ -8,7 +8,7 @@
     python tools/modal_replay.py wait | spend | fetch DIR... | stop
 
 The budget stop has three layers. Before a launch, the larger of Modal's bill for both apps and the wall time of every
-past launch at the full rate, plus the stage's worst case, must stay within --approved-usd and the $50 cap; the stage's worst case is its Modal timeout times the
+past launch at the full rate, plus the stage's worst case, must stay within --approved-usd and the $100 cap; the stage's worst case is its Modal timeout times the
 L40S rate with CPU and memory. Modal kills the function at that timeout. Inside it, run.py gets a --deadline ten
 minutes earlier and starts no cell that could not finish by then. `spend` quotes Modal's own billing report.
 The stage runs as a deployed function, so it survives the local client's 3-hour token expiry.
@@ -30,7 +30,7 @@ APP = f"acr-{ENGINE}-topic34"
 APPS = ("acr-sglang-topic34", "acr-vllm-topic34")
 VOLUME = "acr-sglang-runs"
 RATE_USD_H = 0.000542 * 3600 + 8 * 0.0000131 * 3600 + 32 * 0.00000222 * 3600   # L40S + 8 cores + 32 GiB = $2.59/h
-CAP_USD = 50.0
+CAP_USD = 100.0
 MARGIN_S = 600
 HERE = Path(__file__).resolve().parents[1]
 CORE = ["T_stock_25", "T_stock_10", "T_gate_25", "T_known_25", "T_wm10_25", "T_stock_25_AA"]

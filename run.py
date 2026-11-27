@@ -56,7 +56,7 @@ def cell_cfgs(rule, rates, C, calib, cells=None, wall_s=None, count_window_s=Non
     for c in rule["cells"]:
         if cells is not None and c["name"] not in cells:
             continue
-        cap = rates[c["trace"]]["lam_cap"]
+        cap = c.get("cap_rps") or rates[c["trace"]]["lam_cap"]   # a measured capacity, where the config gives one
         segs = [[t, x * cap] for t, x in c["surge"]] if c.get("surge") else None
         out.append(dict(cell=c["name"], arm=c["arm"], door=c.get("door", False), trace=c["trace"], load=c["load"],
                         rate=c["load"] * cap, segments=segs, surge=c.get("surge"), arrival_seed=c["arrival_seed"],
